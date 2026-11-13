@@ -7,3 +7,6 @@ collector/
 export/
 
 .env
+
+# 个人配置档案（含你自己的搜索条件/文案，不入公开仓库）
+config.local.json

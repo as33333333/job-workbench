@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { api, fmtTime, fmtSalary, expLabel, copyText } from './api.js'
 import { Modal, Empty } from './common.jsx'
 
@@ -37,11 +37,20 @@ function jobDomains(job) {
   return DOMAIN_RULES.filter(([, re]) => re.test(text)).map(([name]) => name)
 }
 
-export default function Jobs({ jobs, reload, toast, selectedIds, setSelectedIds, onGotoAnalyze }) {
+export default function Jobs({ jobs, reload, toast, selectedIds, setSelectedIds, onGotoAnalyze, profileFilters }) {
+  // 优先级：本机 localStorage（你在这里改过的）> 个人配置档案 filters > 内置默认
   const [filters, setFilters] = useState(() => {
-    try { return { ...DEFAULT_FILTERS, ...JSON.parse(localStorage.getItem('jobFilters') || '{}') } }
-    catch { return { ...DEFAULT_FILTERS } }
+    try { return { ...DEFAULT_FILTERS, ...(profileFilters || {}), ...JSON.parse(localStorage.getItem('jobFilters') || '{}') } }
+    catch { return { ...DEFAULT_FILTERS, ...(profileFilters || {}) } }
   })
+  const profileApplied = useRef(!!profileFilters)
+  useEffect(() => {
+    if (profileApplied.current || !profileFilters) return
+    profileApplied.current = true
+    let saved = null
+    try { saved = JSON.parse(localStorage.getItem('jobFilters') || 'null') } catch { saved = null }
+    if (!saved) setFilters(f => ({ ...f, ...profileFilters }))
+  }, [profileFilters])
   const [expanded, setExpanded] = useState({})
   const [showImport, setShowImport] = useState(false)
   const [showGuide, setShowGuide] = useState(false)

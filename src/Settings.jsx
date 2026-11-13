@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { api, fmtTime } from './api.js'
+import { api, fmtTime, download } from './api.js'
 import { DEFAULT_GREETING, GREETING_PLACEHOLDERS, renderGreeting } from '../greeting.js'
 
 /* 预览用的假岗位：只用来展示模板渲染效果，不写入任何数据 */
@@ -20,6 +20,7 @@ export default function Settings({ settings, reload, toast }) {
   const [tuningBusy, setTuningBusy] = useState(false)
   const [greeting, setGreeting] = useState({ ...DEFAULT_GREETING, ...(settings?.greeting || {}) })
   const [greetingBusy, setGreetingBusy] = useState(false)
+  const [profileBusy, setProfileBusy] = useState(false)
 
   useEffect(() => {
     api('/scheduler').then(setSched).catch(() => {})
@@ -98,6 +99,39 @@ export default function Settings({ settings, reload, toast }) {
       reload(); toast('已恢复默认打招呼文案')
     } catch (e) { toast(e.message, 'err') }
     setGreetingBusy(false)
+  }
+
+  /* ---------- 个人配置档案：导出 / 导入 / 把当前筛选存进配置 ---------- */
+  const profileFile = settings?.profileFile || {}
+  const exportProfile = async () => {
+    setProfileBusy(true)
+    try {
+      const r = await api('/profile')
+      download('job-workbench-profile.json', JSON.stringify(r.profile, null, 2))
+      toast('已导出配置（不含 Key、简历正文、岗位库）')
+    } catch (e) { toast(e.message, 'err') }
+    setProfileBusy(false)
+  }
+  const saveFiltersToProfile = async () => {
+    let filters = {}
+    try { filters = JSON.parse(localStorage.getItem('jobFilters') || '{}') } catch { filters = {} }
+    setProfileBusy(true)
+    try {
+      await api('/settings', { method: 'PUT', body: { profileFilters: filters } })
+      reload(); toast('当前岗位库筛选已写入配置')
+    } catch (e) { toast(e.message, 'err') }
+    setProfileBusy(false)
+  }
+  const importProfile = async (file) => {
+    if (!file) return
+    setProfileBusy(true)
+    try {
+      let json = null
+      try { json = JSON.parse(await file.text()) } catch { throw new Error('文件不是合法 JSON') }
+      const r = await api('/profile', { method: 'PUT', body: { profile: json } })
+      reload(); toast(`配置已导入${r.written ? '，并写入 config.local.json' : ''}`)
+    } catch (e) { toast(e.message, 'err') }
+    setProfileBusy(false)
   }
 
   return (
@@ -281,6 +315,32 @@ export default function Settings({ settings, reload, toast }) {
             {greetingBusy ? <span className="spin" /> : '保存打招呼配置'}
           </button>
           <button className="btn" disabled={greetingBusy} onClick={resetGreeting}>恢复默认文案</button>
+        </div>
+      </div>
+
+      <div className="card card-pad" style={{ marginBottom: 16 }}>
+        <div className="sec-title" style={{ marginTop: 0 }}>📦 我的配置（可放私有仓库）</div>
+        <div className="hint" style={{ marginBottom: 12 }}>
+          导出内容只有「设定」：岗位库筛选、打招呼文案、分析参数、定时采集配置。
+          <b>不含</b> AI Key、简历正文、岗位库与分析结果那些数据。
+          把导出的文件放进你自己的私有仓库，需要时下载回来导入；或直接以
+          <code className="kbd" style={{ margin: '0 4px' }}>config.local.json</code>
+          放在项目根目录（已 gitignore），启动时自动应用。
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+          <span className={'tag ' + (profileFile.exists ? 'green' : '')}>
+            {profileFile.exists ? '已存在 config.local.json' : '尚无 config.local.json'}
+          </span>
+          <code className="kbd" style={{ fontSize: 12, wordBreak: 'break-all' }}>{profileFile.path || 'config.local.json'}</code>
+        </div>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+          <button className="btn primary" disabled={profileBusy} onClick={exportProfile}>⬇ 导出配置</button>
+          <button className="btn" disabled={profileBusy} onClick={saveFiltersToProfile}>把当前筛选存进配置</button>
+          <label className="btn" style={{ cursor: profileBusy ? 'not-allowed' : 'pointer' }}>
+            ⬆ 导入配置
+            <input type="file" accept="application/json,.json" style={{ display: 'none' }} disabled={profileBusy}
+              onChange={e => { importProfile(e.target.files?.[0]); e.target.value = '' }} />
+          </label>
         </div>
       </div>
 

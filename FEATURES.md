@@ -118,6 +118,21 @@
 ### 3.6 信息库
 资料名称、类型（简历/项目文档/其他）、正文全部可编辑；同一份资料可以既是简历又是分析来源。
 
+### 3.7 个人配置档案（profile，可放自己的私有仓库）
+把「设定」从数据库里抽成一份 JSON，方便版本化和多机同步。设置页「📦 我的配置」：
+
+| 动作 | 说明 |
+|---|---|
+| ⬇ 导出配置 | 下载 `job-workbench-profile.json`，含 `filters / greeting / analysis / schedule` 四块 |
+| ⬆ 导入配置 | 选择 JSON 导入，同时写回项目根的 `config.local.json` |
+| 把当前筛选存进配置 | 把岗位库当前筛选（关键词/城市/经验/薪资/分类）写进 profile |
+| 文件状态 | 显示 `config.local.json` 路径与是否存在 |
+
+- 导出内容**只有设定**：白名单写死 4 个键，API Key、简历正文、岗位库、分析结果永远不会被导出（有测试断言守着）。
+- `config.local.json` 已在 `.gitignore` 里，不会被公开仓库收录；把它提交到**你自己的私有仓库**即可跨机同步。
+- 若项目根存在 `config.local.json`，**启动时会自动应用**（文件即个人设定的来源），之后在界面里改设置也会写回该文件，两者保持同步。
+- 优先级：岗位库筛选 = 本机 `localStorage`（你手动改过的）> profile > 内置默认；其他配置以文件/数据库为准。
+
 ---
 
 ## 4. 怎么用（从零到第一次分析）
@@ -144,7 +159,23 @@
 3. 采集完成后导入岗位库（自动去重、合并 JD 详情）。
 4. 其余同上。
 
-### 4.3 日常节奏
+### 4.3 把自己的设定放进私有仓库（可选）
+
+```bash
+# 1) 在 GitHub 建一个 private 仓库，例如 job-workbench-profile
+# 2) 第一次：设置页 → 我的配置 → 导出配置，把下载的 JSON 放进该仓库
+git init job-workbench-profile && cd job-workbench-profile
+mv ~/Downloads/job-workbench-profile.json config.local.json
+git add . && git commit -m "my job-workbench profile" && git push
+
+# 3) 换机器 / 重装后：把该文件放回项目根，再启动
+cp config.local.json ~/job-workbench/
+cd ~/job-workbench && npm start   # 启动时会打印「已应用 config.local.json」
+```
+
+注意：只同步「设定」。岗位库、简历、分析结果在 `data/`，要搬家请直接拷 `data/workbench.db`（不建议用 git 同步二进制库）。AI Key 永远只在本机 `.env`。
+
+### 4.4 日常节奏
 早上（自动）：定时采集 → 岗位库新增岗位。
 中午：筛选 → 勾 2–3 个岗位做分析 → 采纳修改 → 打招呼。
 晚上：看「投递跟踪」，把已沟通的推进状态。

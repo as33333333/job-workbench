@@ -75,6 +75,7 @@ export default function App() {
           {tab === 'jobs' && (
             <Jobs
               jobs={jobs} reload={reloadJobs} toast={showToast}
+              profileFilters={settings?.profileFilters}
               selectedIds={selectedIds} setSelectedIds={setSelectedIds}
               onGotoAnalyze={() => setTab('analyze')}
             />

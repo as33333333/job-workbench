@@ -12,7 +12,8 @@
     "test:analysis": "node scripts/test-analysis.mjs",
     "test:greeting": "node scripts/test-greeting.mjs",
     "seed:sample-analysis": "node scripts/seed-sample-analysis.mjs",
-    "ai:check": "node scripts/ai-check.mjs"
+    "ai:check": "node scripts/ai-check.mjs",
+    "test:profile": "node scripts/test-profile.mjs"
   },
   "dependencies": {
     "express": "^4.19.2",

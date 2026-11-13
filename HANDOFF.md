@@ -112,11 +112,24 @@
 - 已打招呼的岗位按钮变「重新打招呼」；「投递跟踪」筛选已包含「已打招呼」
 - **能力边界（刻意的）**：Boss 无稳定聊天深链，最后一步「粘贴发送」由人在 Boss 页面完成；本项目不做自动发消息（风控与平台条款），也不假装已发送——点一次只代表「文案已复制 + 页面已打开」
 
+### 2.10 个人配置档案（`profile.js`，2026-11-13）
+- 目的：把「搜索条件 / 打招呼 / 分析参数 / 采集配置」抽成可版本化 JSON，放进用户**自己的私有仓库**；公开仓库只留代码
+- 存储：项目根 `config.local.json`（已 `.gitignore`）；DB 里对应 `settings{scheduleConfig, greetingConfig, analysisTuning, profileFilters}`
+- 白名单：`PROFILE_KEYS = filters, greeting, analysis, schedule`；`normalizeProfile` 丢弃一切未知键 → **Key / 简历正文 / 岗位库 / 分析结果绝不会被导出**（`test:profile` 有断言）
+- 归一化：`sanitizeFilters`（query/city/exp/view/sort 字符串、salary 0~100、domains 去重≤30）、`sanitizeSchedule`（time 严格 `HH:MM` 且 00-23:00-59、pages 1~10、maxDetails 0~50）、greeting/analysis 复用 `normalizeGreeting`/`normalizeTuning`
+- 同步策略：
+  - 启动时若存在 `config.local.json` → `applyProfile()` 覆盖 DB（日志打印「已应用 config.local.json」）
+  - 之后界面里改设置（analysis/greeting/profileFilters）→ `syncProfileFile()` 写回文件，两边不漂移
+  - `PUT /api/profile` 默认落盘（`persist:false` 只改 DB）
+- 前端：设置页「📦 我的配置」卡片（导出下载 / 导入文件 / 把当前筛选存进配置 / 文件状态）；岗位库筛选优先级 = `localStorage` > `profile.filters` > 内置默认（`App` 传 `profileFilters`，`Jobs` 用 `useRef` 只合并一次，避免覆盖本机手动筛选）
+
 ## 3. 修改的文件
 
 **新增**
 - `analysis.js` — 分析引擎（校验/提示词/规范化/评分/年限/多岗合并/基础模式/限流并发/参数归一化）
 - `greeting.js` — 打招呼配置归一化与模板渲染（纯函数）
+- `profile.js` — 个人配置档案（白名单归一化 + `config.local.json` 读写）
+- `scripts/test-profile.mjs` — 配置档案自测（26 断言）
 - `scripts/test-greeting.mjs` — 打招呼自测（30 断言）
 - `jobtext.js` — JD 噪声清理与完整性判定
 - `pdftext.js` — PDF 版面重排提取、解析质量判定、OCR 编排
@@ -156,6 +169,8 @@
 | `POST /api/jobs/:id/greeting` | 记录文案与时间 → `{text, config, job}`；状态按 `config.markStatus` 推进（仅未处理/不感兴趣） |
 | `GET/PUT /api/settings`（打招呼） | `PUT {greeting:{name,years,highlight,template,autoCopy,openPage,preview,markStatus}}`；GET 额外返回 `greeting/greetingDefaults/greetingPlaceholders` |
 | 岗位字段 | `jobs` 新增 `greetedAt`、`greetingText`（`ensureColumn` 迁移，已实测写入/还原） |
+| `GET /api/profile` | 返回 `profile{filters,greeting,analysis,schedule}` + `keys` + `filePath/fileExists`；不含 Key |
+| `PUT /api/profile` | `{profile, persist?}` → 应用并（默认）写 `config.local.json`；返回 `written` |
 | `POST /api/documents/parse` | 上传预览（不落库）：`{fileBase64,fileName,ocr?}` → `{text,preview,meta{...}}` |
 | `POST /api/documents` | ①`{fileBase64,fileName}`（服务端解析，源文件存 `data/uploads`）②`{content,parseMeta,...}`（预览确认后入库） |
 
@@ -188,6 +203,8 @@
 | 打招呼字段迁移 | 导入 `db.js` 触发 `ensureColumn` | `jobs.greetedAt`、`jobs.greetingText` 已加列；job 175 写入「已打招呼 + 文案」后立即还原为「未处理 + null」，真实数据未被污染 |
 | 前端构建 | `npm run build` | 40 modules，1.4s 通过（`greeting.js` 从 `src/` 外引用正常） |
 | 分析回归 | `npm run test:analysis` | 65/65 仍通过 |
+| 配置档案自测 | `npm run test:profile` | **26/26 通过**（未知键丢弃、Key/简历不导出、并发与 token 夹紧、非法时间丢弃、domains 去重、坏 JSON 可读报错） |
+| 配置档案链路 | `GET/PUT /api/profile` | 生成 `config.local.json`（4 块配置、无 Key），重启日志出现「已应用 config.local.json」，文件未被 git 跟踪 |
 
 **已修复的真实报错**
 - `AI 返回内容为空（{"finish_reason":"length",...,"reasoning_tokens":6000}）` → 思考耗尽输出预算；thinking 控制 + 提高 maxTokens + 重试

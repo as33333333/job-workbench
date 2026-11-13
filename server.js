@@ -27,6 +27,10 @@ import { stripJdNoise, jdLooksIncomplete } from './jobtext.js'
 import {
   GREETING_PLACEHOLDERS, DEFAULT_GREETING, normalizeGreeting, renderGreeting,
 } from './greeting.js'
+import {
+  PROFILE_FILENAME, PROFILE_KEYS, buildProfile, normalizeProfile,
+  readProfileFile, writeProfileFile, sanitizeFilters,
+} from './profile.js'
 import { extractPdfSmart, assessText, cleanText } from './pdftext.js'
 import {
   scheduleConfig, saveScheduleConfig, scheduleStatus, runCollectOnce, startScheduler,
@@ -79,6 +83,57 @@ function saveGreetingConfig(raw) {
   const next = normalizeGreeting({ ...greetingConfig(), ...(raw || {}) })
   setSetting(GREETING_KEY, JSON.stringify(next))
   return next
+}
+
+/* ================= 个人配置档案（profile）：落一份可版本化的设定文件 =================
+ * 文件默认在项目根 config.local.json（已 gitignore），可提交到你自己的私有仓库。
+ * 只含「设定」，不含 API Key、简历正文、岗位库、分析结果。 */
+const PROFILE_FILE = path.join(__dirname, PROFILE_FILENAME)
+const PROFILE_FILTERS_KEY = 'profileFilters'
+
+function profileFilters() {
+  try { return sanitizeFilters(JSON.parse(getSetting(PROFILE_FILTERS_KEY) || '{}')) } catch { return {} }
+}
+function saveProfileFilters(raw) {
+  const next = sanitizeFilters(raw)
+  setSetting(PROFILE_FILTERS_KEY, JSON.stringify(next))
+  return next
+}
+/* 当前运行状态 → profile（导出、写回文件都用它） */
+function currentProfile() {
+  return buildProfile({
+    filters: profileFilters(),
+    greeting: greetingConfig(),
+    analysis: analysisTuning(),
+    schedule: scheduleConfig(),
+  })
+}
+/* profile → 运行状态（导入、启动时应用） */
+function applyProfile(profile) {
+  const p = normalizeProfile(profile)
+  if (p.schedule) saveScheduleConfig(p.schedule)
+  if (p.greeting) saveGreetingConfig(p.greeting)
+  if (p.analysis) saveAnalysisTuning(p.analysis)
+  if (p.filters) saveProfileFilters(p.filters)
+  return p
+}
+/* 文件与 DB 双向保持同步：文件存在时，任何设置改动都写回文件 */
+function syncProfileFile() {
+  try {
+    if (!fs.existsSync(PROFILE_FILE)) return false
+    writeProfileFile(PROFILE_FILE, currentProfile())
+    return true
+  } catch (e) {
+    console.warn('[配置] 写回 config.local.json 失败：', e.message)
+    return false
+  }
+}
+
+const startupProfile = readProfileFile(PROFILE_FILE)
+if (startupProfile.error) console.warn('[配置]', startupProfile.error)
+else if (startupProfile.profile) {
+  applyProfile(startupProfile.profile)
+  console.log('[配置] 已应用 config.local.json（个人设定以该文件为准）')
 }
 
 /* ================= 通用解析工具 ================= */
@@ -1140,18 +1195,52 @@ app.get('/api/settings', (req, res) => {
     greeting: greetingConfig(),
     greetingDefaults: DEFAULT_GREETING,
     greetingPlaceholders: GREETING_PLACEHOLDERS,
+    profileFilters: profileFilters(),
+    profileFile: { path: PROFILE_FILE, exists: fs.existsSync(PROFILE_FILE) },
     scraperDir: SCRAPER_RESULT_DIR,
   })
+})
+
+/* ================= 个人配置档案：导出 / 导入 ================= */
+app.get('/api/profile', (req, res) => {
+  const file = readProfileFile(PROFILE_FILE)
+  res.json({
+    profile: currentProfile(),
+    keys: PROFILE_KEYS,
+    filePath: PROFILE_FILE,
+    fileExists: file.exists,
+    fileError: file.error || null,
+  })
+})
+
+app.put('/api/profile', (req, res) => {
+  try {
+    const body = req.body || {}
+    const raw = body.profile ?? body
+    if (!raw || typeof raw !== 'object') return res.status(400).json({ error: '配置内容为空' })
+    applyProfile(raw)
+    // 导入后默认落盘，让「私有仓库 → 本机」这条链路闭环；persist:false 则只改内存/DB
+    let written = false
+    if (body.persist !== false) {
+      writeProfileFile(PROFILE_FILE, currentProfile())
+      written = true
+    }
+    res.json({ ok: true, profile: currentProfile(), filePath: PROFILE_FILE, written })
+  } catch (e) {
+    res.status(400).json({ error: `导入失败：${e.message}` })
+  }
 })
 app.put('/api/settings', (req, res) => {
   const body = req.body || {}
   saveAiConfig(body)
   const analysis = body.analysis !== undefined ? saveAnalysisTuning(body.analysis) : analysisTuning()
   const greeting = body.greeting !== undefined ? saveGreetingConfig(body.greeting) : greetingConfig()
+  const filters = body.profileFilters !== undefined ? saveProfileFilters(body.profileFilters) : profileFilters()
+  if (body.analysis !== undefined || body.greeting !== undefined || body.profileFilters !== undefined) syncProfileFile()
   const cfg = aiConfig()
   res.json({
     apiBase: cfg.apiBase, model: cfg.model, hasKey: !!cfg.apiKey, ready: aiReady(), keySource: cfg.source,
-    analysis, greeting,
+    analysis, greeting, profileFilters: filters,
   })
 })
 app.post('/api/settings/test', async (req, res) => {
