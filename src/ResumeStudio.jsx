@@ -3,7 +3,10 @@ import { api, download, copyText } from './api.js'
 import { Empty, Modal } from './common.jsx'
 import { marked } from 'marked'
 
-export default function ResumeStudio({ jobs, docs, resumeTargets, setResumeTargets, lastAnalysis, toast, settings }) {
+export default function ResumeStudio({
+  jobs, docs, resumeTargets, setResumeTargets, lastAnalysis,
+  pendingVersionId, clearPendingVersion, toast, settings,
+}) {
   const [docId, setDocId] = useState(null)
   const [extra, setExtra] = useState('')
   const [busy, setBusy] = useState(false)
@@ -61,6 +64,13 @@ export default function ResumeStudio({ jobs, docs, resumeTargets, setResumeTarge
       setVersion(v); setContent(v.content); setDirty(false)
     } catch (e) { toast(e.message, 'err') }
   }
+
+  // 从「JD分析」采纳修改后跳转过来：直接载入刚生成的版本
+  useEffect(() => {
+    if (!pendingVersionId) return
+    loadVersion(pendingVersionId)
+    clearPendingVersion?.()
+  }, [pendingVersionId])
 
   const removeVersion = async (id) => {
     if (!confirm('确定删除该简历版本？')) return
@@ -138,6 +148,13 @@ export default function ResumeStudio({ jobs, docs, resumeTargets, setResumeTarge
         <div className="card card-pad" style={{ marginTop: 16, background: 'linear-gradient(180deg,#f6f9ff,#fff)' }}>
           <b>本版本依据：</b>{version.jobTitles || targetJobs.map(j => j.title).join('、')}
           <span style={{ color: 'var(--faint)', fontSize: 12 }}>（基础简历：{version.documentName} · {new Date(version.createdAt).toLocaleString()}）</span>
+        </div>
+      )}
+
+      {version?.analysisId && (
+        <div className="callout info" style={{ marginTop: 10 }}>
+          该版本由「JD 匹配分析」中采纳的 {version.adoptedChangeIds?.length || 0} 条修改生成；<b>原始简历未被改动</b>。
+          如需回到原版，可在下方版本历史载入其它版本，或回分析页撤销采纳后重新生成。
         </div>
       )}
 

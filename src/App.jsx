@@ -23,6 +23,7 @@ export default function App() {
   const [settings, setSettings] = useState(null)
   const [selectedIds, setSelectedIds] = useState([])
   const [resumeTargets, setResumeTargets] = useState([])
+  const [pendingVersionId, setPendingVersionId] = useState(null)
   const [lastAnalysis, setLastAnalysis] = useState(null)
   const [toast, setToast] = useState(null)
 
@@ -83,7 +84,11 @@ export default function App() {
               jobs={jobs} docs={docs} reloadDocs={reloadDocs}
               selectedIds={selectedIds} setSelectedIds={setSelectedIds}
               lastAnalysis={lastAnalysis} setLastAnalysis={setLastAnalysis}
-              onGotoResume={(jobIds) => { setResumeTargets(jobIds); setTab('resume') }}
+              onGotoResume={(jobIds, versionId) => {
+                setResumeTargets(jobIds || [])
+                setPendingVersionId(versionId || null)
+                setTab('resume')
+              }}
               toast={showToast} settings={settings}
             />
           )}
@@ -92,6 +97,8 @@ export default function App() {
               jobs={jobs} docs={docs}
               resumeTargets={resumeTargets} setResumeTargets={setResumeTargets}
               lastAnalysis={lastAnalysis}
+              pendingVersionId={pendingVersionId}
+              clearPendingVersion={() => setPendingVersionId(null)}
               toast={showToast} settings={settings}
             />
           )}

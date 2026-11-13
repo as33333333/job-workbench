@@ -75,6 +75,21 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 `)
 
+/* 兼容旧库的字段迁移（重复执行安全） */
+function ensureColumn(table, column, type) {
+  try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`) } catch { /* 已存在则忽略 */ }
+}
+ensureColumn('analyses', 'updatedAt', 'TEXT')
+ensureColumn('analyses', 'answers', 'TEXT')
+ensureColumn('analyses', 'status', 'TEXT')
+ensureColumn('analyses', 'resumeDocId', 'INTEGER')
+ensureColumn('analyses', 'libraryDocId', 'INTEGER')
+ensureColumn('resume_versions', 'analysisId', 'INTEGER')
+ensureColumn('resume_versions', 'adoptedChangeIds', 'TEXT')
+ensureColumn('documents', 'parseMeta', 'TEXT')
+ensureColumn('jobs', 'greetedAt', 'TEXT')
+ensureColumn('jobs', 'greetingText', 'TEXT')
+
 const now = () => new Date().toISOString()
 const j = (v, d = '[]') => { try { return JSON.parse(v ?? d) } catch { return d } }
 
@@ -91,7 +106,8 @@ export function setSetting(key, value) {
 /* ---------- jobs ---------- */
 const JOB_FIELDS = ['title','category','company','city','recruitType','expMin','expMax',
   'experienceText','salaryMin','salaryMax','salaryText','salaryNote','education','tags',
-  'description','source','sourceUrl','bossActive','publishedAt','favorite','status','appliedAt']
+  'description','source','sourceUrl','bossActive','publishedAt','favorite','status','appliedAt',
+  'greetedAt','greetingText']
 
 function normalizeJob(row) {
   return { ...row, tags: j(row.tags, []), favorite: !!row.favorite }
@@ -150,11 +166,16 @@ export function jobExists({ sourceUrl, title, company, city }) {
 }
 
 /* ---------- documents ---------- */
+function normalizeDoc(row) {
+  if (!row) return null
+  return { ...row, parseMeta: j(row.parseMeta, null) }
+}
 export function createDocument(fields = {}) {
   const info = db.prepare(
-    'INSERT INTO documents (name, type, source, sourceUrl, content, createdAt) VALUES (?,?,?,?,?,?)'
+    'INSERT INTO documents (name, type, source, sourceUrl, content, createdAt, parseMeta) VALUES (?,?,?,?,?,?,?)'
   ).run(fields.name || '未命名', fields.type || '其他', fields.source || '粘贴文本',
-        fields.sourceUrl || '', fields.content || '', now())
+        fields.sourceUrl || '', fields.content || '', now(),
+        fields.parseMeta ? JSON.stringify(fields.parseMeta) : null)
   return documentById(info.lastInsertRowid)
 }
 export function updateDocument(id, fields = {}) {
@@ -162,14 +183,15 @@ export function updateDocument(id, fields = {}) {
   for (const k of ['name', 'type', 'content']) {
     if (fields[k] !== undefined) { sets.push(`${k} = ?`); vals.push(fields[k]) }
   }
+  if (fields.parseMeta !== undefined) { sets.push('parseMeta = ?'); vals.push(fields.parseMeta ? JSON.stringify(fields.parseMeta) : null) }
   if (sets.length) db.prepare(`UPDATE documents SET ${sets.join(',')} WHERE id = ?`).run(...vals, id)
   return documentById(id)
 }
 export function documentById(id) {
-  return db.prepare('SELECT * FROM documents WHERE id = ?').get(id) || null
+  return normalizeDoc(db.prepare('SELECT * FROM documents WHERE id = ?').get(id))
 }
 export function listDocuments() {
-  return db.prepare('SELECT * FROM documents ORDER BY id DESC').all()
+  return db.prepare('SELECT * FROM documents ORDER BY id DESC').all().map(normalizeDoc)
 }
 export function deleteDocument(id) {
   db.prepare('DELETE FROM documents WHERE id = ?').run(id)
@@ -178,18 +200,37 @@ export function deleteDocument(id) {
 /* ---------- analyses ---------- */
 export function createAnalysis(a) {
   const info = db.prepare(
-    'INSERT INTO analyses (jobIds, jobTitles, documentId, documentName, mode, data, createdAt) VALUES (?,?,?,?,?,?,?)'
+    `INSERT INTO analyses (jobIds, jobTitles, documentId, documentName, mode, data, createdAt, updatedAt, answers, status, resumeDocId, libraryDocId)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
   ).run(JSON.stringify(a.jobIds || []), a.jobTitles || '', a.documentId || null,
-        a.documentName || '', a.mode || 'ai', JSON.stringify(a.data || {}), now())
+        a.documentName || '', a.mode || 'ai', JSON.stringify(a.data || {}), now(), now(),
+        JSON.stringify(a.answers || []), a.status || 'ok', a.resumeDocId || a.documentId || null, a.libraryDocId || null)
   return analysisById(info.lastInsertRowid)
+}
+export function updateAnalysis(id, fields = {}) {
+  const sets = [], vals = []
+  if (fields.data !== undefined) { sets.push('data = ?'); vals.push(JSON.stringify(fields.data)) }
+  if (fields.answers !== undefined) { sets.push('answers = ?'); vals.push(JSON.stringify(fields.answers)) }
+  if (fields.status !== undefined) { sets.push('status = ?'); vals.push(fields.status) }
+  if (fields.mode !== undefined) { sets.push('mode = ?'); vals.push(fields.mode) }
+  if (sets.length) {
+    sets.push('updatedAt = ?'); vals.push(now())
+    db.prepare(`UPDATE analyses SET ${sets.join(', ')} WHERE id = ?`).run(...vals, id)
+  }
+  return analysisById(id)
 }
 export function analysisById(id) {
   const row = db.prepare('SELECT * FROM analyses WHERE id = ?').get(id)
-  return row ? { ...row, jobIds: j(row.jobIds), data: j(row.data, '{}') } : null
+  return row ? {
+    ...row,
+    jobIds: j(row.jobIds),
+    data: j(row.data, '{}'),
+    answers: j(row.answers, []),
+  } : null
 }
 export function listAnalyses() {
   return db.prepare(
-    'SELECT id, jobIds, jobTitles, documentName, mode, createdAt FROM analyses ORDER BY id DESC'
+    'SELECT id, jobIds, jobTitles, documentName, mode, createdAt, updatedAt, status, resumeDocId, libraryDocId FROM analyses ORDER BY id DESC'
   ).all().map(r => ({ ...r, jobIds: j(r.jobIds) }))
 }
 export function deleteAnalysis(id) {
@@ -199,28 +240,29 @@ export function deleteAnalysis(id) {
 /* ---------- resume versions ---------- */
 export function createResumeVersion(r) {
   const info = db.prepare(
-    'INSERT INTO resume_versions (name, jobIds, jobTitles, documentId, documentName, content, changeNotes, createdAt, updatedAt) VALUES (?,?,?,?,?,?,?,?,?)'
+    `INSERT INTO resume_versions (name, jobIds, jobTitles, documentId, documentName, content, changeNotes, createdAt, updatedAt, analysisId, adoptedChangeIds)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`
   ).run(r.name || '定制简历', JSON.stringify(r.jobIds || []), r.jobTitles || '',
         r.documentId || null, r.documentName || '', r.content || '',
-        JSON.stringify(r.changeNotes || []), now(), now())
+        JSON.stringify(r.changeNotes || []), now(), now(),
+        r.analysisId || null, JSON.stringify(r.adoptedChangeIds || []))
   return resumeVersionById(info.lastInsertRowid)
 }
 export function updateResumeVersion(id, fields = {}) {
-  if (fields.content !== undefined || fields.name !== undefined) {
-    const sets = ['updatedAt = ?']; const vals = [now()]
-    if (fields.content !== undefined) { sets.push('content = ?'); vals.push(fields.content) }
-    if (fields.name !== undefined) { sets.push('name = ?'); vals.push(fields.name) }
-    db.prepare(`UPDATE resume_versions SET ${sets.join(',')} WHERE id = ?`).run(...vals, id)
-  }
+  const sets = ['updatedAt = ?']; const vals = [now()]
+  if (fields.content !== undefined) { sets.push('content = ?'); vals.push(fields.content) }
+  if (fields.name !== undefined) { sets.push('name = ?'); vals.push(fields.name) }
+  if (fields.adoptedChangeIds !== undefined) { sets.push('adoptedChangeIds = ?'); vals.push(JSON.stringify(fields.adoptedChangeIds)) }
+  db.prepare(`UPDATE resume_versions SET ${sets.join(',')} WHERE id = ?`).run(...vals, id)
   return resumeVersionById(id)
 }
 export function resumeVersionById(id) {
   const row = db.prepare('SELECT * FROM resume_versions WHERE id = ?').get(id)
-  return row ? { ...row, jobIds: j(row.jobIds), changeNotes: j(row.changeNotes) } : null
+  return row ? { ...row, jobIds: j(row.jobIds), changeNotes: j(row.changeNotes), adoptedChangeIds: j(row.adoptedChangeIds, []) } : null
 }
 export function listResumeVersions() {
   return db.prepare(
-    'SELECT id, name, jobIds, jobTitles, documentName, createdAt, updatedAt FROM resume_versions ORDER BY id DESC'
+    'SELECT id, name, jobIds, jobTitles, documentName, createdAt, updatedAt, analysisId FROM resume_versions ORDER BY id DESC'
   ).all().map(r => ({ ...r, jobIds: j(r.jobIds) }))
 }
 export function deleteResumeVersion(id) {

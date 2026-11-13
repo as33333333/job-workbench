@@ -64,6 +64,11 @@ export default function Library({ docs, reload, toast }) {
               <div className="doc-meta">
                 <span className={'tag ' + (TYPE_COLOR[d.type] || '')}>{d.type}</span>{' '}
                 {(d.content || '').length} 字 · {d.source}{d.sourceUrl ? ` · ${d.sourceUrl.slice(0, 50)}` : ''} · {new Date(d.createdAt).toLocaleString()}
+                {(d.parseMeta?.suspicious || (d.source === '文件上传' && (d.content || '').length < 200)) && (
+                  <span className="tag red" title={(d.parseMeta?.warnings || []).join('；') || '正文可能没解析完整'} style={{ marginLeft: 6 }}>
+                    解析可能不完整
+                  </span>
+                )}
               </div>
             </div>
             <button className="btn sm" onClick={() => setPreview(d)}>查看</button>
@@ -95,27 +100,70 @@ function AddPanel({ tab, setTab, reload, toast }) {
   const [url, setUrl] = useState('')
   const [busy, setBusy] = useState(false)
   const [drag, setDrag] = useState(false)
+  const [pending, setPending] = useState([])
   const fileRef = useRef(null)
 
+  const readBase64 = (f) => new Promise((res, rej) => {
+    const r = new FileReader()
+    r.onload = () => res(String(r.result).split(',')[1])
+    r.onerror = rej
+    r.readAsDataURL(f)
+  })
+
+  /* 先解析预览，用户确认「提取到什么」之后再入库，避免把 91 字的残缺简历当完整材料用 */
   const uploadFiles = async (files) => {
+    setBusy(true)
+    const list = []
     for (const f of files) {
-      setBusy(true)
+      const docName = name || f.name.replace(/\.[^.]+$/, '')
       try {
-        const b64 = await new Promise((res, rej) => {
-          const r = new FileReader()
-          r.onload = () => res(String(r.result).split(',')[1])
-          r.onerror = rej
-          r.readAsDataURL(f)
-        })
+        const b64 = await readBase64(f)
+        const r = await api('/documents/parse', { method: 'POST', body: { fileBase64: b64, fileName: f.name } })
+        list.push({ fileName: f.name, name: docName, b64, ...r })
+      } catch (e) {
+        if (e.status === 404) {
+          // 旧版服务端没有预览接口（8787 尚未重启）：退回直接入库
+          try {
+            const b64 = await readBase64(f)
+            await api('/documents', { method: 'POST', body: { fileBase64: b64, fileName: f.name, name: docName, type } })
+            toast(`已导入「${f.name}」（旧版服务端，无解析预览）`)
+          } catch (e2) { toast(`${f.name}：${e2.message}`, 'err') }
+        } else toast(`${f.name}：${e.message}`, 'err')
+      }
+    }
+    setPending(list)
+    setName('')
+    setBusy(false)
+  }
+
+  const retryOcr = async (idx) => {
+    const item = pending[idx]
+    if (!item) return
+    setBusy(true)
+    try {
+      const r = await api('/documents/parse', { method: 'POST', body: { fileBase64: item.b64, fileName: item.fileName, ocr: true } })
+      setPending(list => list.map((x, i) => i === idx ? { ...x, ...r } : x))
+      toast(r.meta?.method === 'ocr' ? `OCR 完成，提取到 ${r.meta.chars} 字` : 'OCR 未明显改善，建议改用粘贴文本')
+    } catch (e) { toast(e.message, 'err') }
+    setBusy(false)
+  }
+
+  const savePending = async () => {
+    setBusy(true)
+    let ok = 0
+    for (const p of pending) {
+      try {
         await api('/documents', {
           method: 'POST',
-          body: { fileBase64: b64, fileName: f.name, name: name || f.name.replace(/\.[^.]+$/, ''), type },
+          body: { name: p.name, type, source: '文件上传', content: p.text, parseMeta: p.meta },
         })
-        toast(`已导入「${f.name}」`)
-      } catch (e) { toast(`${f.name}：${e.message}`, 'err') }
-      setBusy(false)
+        ok++
+      } catch (e) { toast(`${p.fileName}：${e.message}`, 'err') }
     }
-    setName(''); reload()
+    setBusy(false)
+    if (ok) toast(`已保存 ${ok} 份资料`)
+    setPending([])
+    reload()
   }
 
   const submitText = async () => {
@@ -172,6 +220,42 @@ function AddPanel({ tab, setTab, reload, toast }) {
           )}
         </label>
       )}
+      {tab === 'file' && pending.length > 0 && (
+        <div style={{ marginTop: 14 }}>
+          {pending.map((p, i) => {
+            const meta = p.meta || {}
+            const methodLabel = meta.method === 'ocr' ? '系统 OCR' : meta.method === 'docx' ? 'Word 文字' : 'PDF 文字层'
+            return (
+              <div key={p.fileName + i} className="card card-pad" style={{ marginBottom: 10 }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <b style={{ fontSize: 14 }}>{p.fileName}</b>
+                  <span className="tag">{meta.chars || 0} 字</span>
+                  {meta.pages > 0 && <span className="tag">{meta.pages} 页 · 约 {meta.charsPerPage} 字/页</span>}
+                  <span className={'tag ' + (meta.method === 'ocr' ? 'blue' : '')}>{methodLabel}</span>
+                  {meta.suspicious && <span className="tag red">解析不完整</span>}
+                  {meta.suspicious && (
+                    <button className="btn sm" disabled={busy} onClick={() => retryOcr(i)}>用系统 OCR 重新识别</button>
+                  )}
+                  <button className="btn sm" onClick={() => setPending(list => list.filter((_, x) => x !== i))}>移除</button>
+                </div>
+                {(meta.warnings || []).map((w, k) => (
+                  <div key={k} className="callout warn" style={{ margin: '8px 0 0' }}>{w}</div>
+                ))}
+                <textarea className="textarea" value={p.text || ''} style={{ marginTop: 8, minHeight: 110, fontSize: 12.5 }}
+                  onChange={e => setPending(list => list.map((x, k) => k === i ? { ...x, text: e.target.value } : x))} />
+                <div className="hint" style={{ marginTop: 6 }}>
+                  以上是实际入库的全文，可直接修改后再保存（例如 OCR 个别错字）。保存的是这份文本，不是原文件。
+                </div>
+              </div>
+            )
+          })}
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button className="btn primary" disabled={busy} onClick={savePending}>确认保存 {pending.length} 份</button>
+            <button className="btn" disabled={busy} onClick={() => setPending([])}>取消</button>
+          </div>
+        </div>
+      )}
+
       {tab === 'text' && (
         <div>
           <div className="field"><label>名称</label><input className="input" value={name} onChange={e => setName(e.target.value)} placeholder="如：2023年XX项目复盘" /></div>

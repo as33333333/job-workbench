@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { api, fmtTime, fmtSalary, expLabel } from './api.js'
+import { api, fmtTime, fmtSalary, expLabel, copyText } from './api.js'
 import { Modal, Empty } from './common.jsx'
 
-const DEFAULT_FILTERS = { query: '产品经理', city: '深圳', exp: 'social3', salary: 15, view: 'all', sort: 'published' }
+const DEFAULT_FILTERS = { query: '产品经理', city: '深圳', exp: 'social3', salary: 15, view: 'all', sort: 'published', domains: [] }
 const EXP_OPTIONS = [
   { v: 'any', label: '经验不限' },
   { v: 'social3', label: '社招 · 3年内' },
@@ -12,7 +12,30 @@ const EXP_OPTIONS = [
   { v: 'intern', label: '实习' },
 ]
 const SALARY_OPTIONS = [0, 10, 15, 20, 25, 30, 40]
-const STATUS_TAG = { 未处理: '', 已投递: 'blue', 面试中: 'purple', offer: 'green', 不感兴趣: '' }
+const STATUS_TAG = { 未处理: '', 已打招呼: 'green', 待投递: 'orange', 已投递: 'blue', 面试中: 'purple', offer: 'green', 不感兴趣: '' }
+const APPLIED_STATUS = ['已打招呼', '待投递', '已投递', '面试中', 'offer']
+
+/* 岗位业务分类：按 标题/标签/JD前段 关键词规则匹配，一个岗位可命中多个分类 */
+const DOMAIN_RULES = [
+  ['AI/大模型', /(\bai\b|人工智能|大模型|llm|gpt|aigc|agent|智能体|机器学习|deepseek|chatgpt)/i],
+  ['电商/跨境', /(电商|跨境|亚马逊|amazon|shopee|tiktok shop|店铺|卖家|listing)/i],
+  ['用户产品', /(用户产品|c端|社区|内容|增长|会员|直播|短视频|feed|小程序)/i],
+  ['B端/SaaS', /(b端|saas|erp|crm|中台|企业服务|tob|工作台|oa|数字化)/i],
+  ['硬件', /(硬件|3c|充电|手机|穿戴|数码|耳机|音箱|摄像头|机器人|电子)/i],
+  ['物联网', /(物联网|iot|智能家居|传感|智能设备)/i],
+  ['金融', /(金融|支付|风控|信贷|保险|证券|银行|基金|理财|交易系统)/i],
+  ['教育', /(教育|k12|学习机|课程|教研|职教|考试|青少)/i],
+  ['供应链/物流', /(供应链|物流|仓储|wms|tms|采购|履约|货代|海外仓)/i],
+  ['医疗健康', /(医疗|健康|医药|问诊|医生|康复|营养|口腔)/i],
+  ['游戏', /(游戏|电竞|玩法|发行|mmo|rpg)/i],
+  ['数据产品', /(数据产品|商业智能|数仓|报表|指标平台|数据分析平台|bi)/i],
+  ['出海', /(出海|海外|国际化|global|多语言|localization)/i],
+]
+
+function jobDomains(job) {
+  const text = `${job.title || ''} ${(job.tags || []).join(' ')} ${job.category || ''} ${(job.description || '').slice(0, 300)}`
+  return DOMAIN_RULES.filter(([, re]) => re.test(text)).map(([name]) => name)
+}
 
 export default function Jobs({ jobs, reload, toast, selectedIds, setSelectedIds, onGotoAnalyze }) {
   const [filters, setFilters] = useState(() => {
@@ -24,6 +47,8 @@ export default function Jobs({ jobs, reload, toast, selectedIds, setSelectedIds,
   const [showGuide, setShowGuide] = useState(false)
   const [editing, setEditing] = useState(null) // null | 'new' | job对象
   const [applying, setApplying] = useState(null)
+  const [greetingBusy, setGreetingBusy] = useState(null)
+  const [greetingDraft, setGreetingDraft] = useState(null) // {job, text} 预览/编辑后发送
 
   useEffect(() => { localStorage.setItem('jobFilters', JSON.stringify(filters)) }, [filters])
 
@@ -32,6 +57,7 @@ export default function Jobs({ jobs, reload, toast, selectedIds, setSelectedIds,
   const filtered = useMemo(() => {
     const q = filters.query.trim().toLowerCase()
     const city = filters.city.trim()
+    const selDomains = filters.domains || []
     let list = jobs.filter(j => {
       if (q && !(`${j.title} ${j.category} ${(j.tags || []).join(' ')} ${j.company}`.toLowerCase().includes(q))) return false
       if (city && !(j.city || '').includes(city)) return false
@@ -42,7 +68,8 @@ export default function Jobs({ jobs, reload, toast, selectedIds, setSelectedIds,
       if (filters.exp === 'intern' && j.recruitType !== '实习') return false
       if (filters.salary > 0 && !((j.salaryMin || 0) >= filters.salary)) return false
       if (filters.view === 'fav' && !j.favorite) return false
-      if (filters.view === 'applied' && !['已投递', '面试中', 'offer'].includes(j.status)) return false
+      if (filters.view === 'applied' && !APPLIED_STATUS.includes(j.status)) return false
+      if (selDomains.length && !selDomains.some(d => jobDomains(j).includes(d))) return false
       return true
     })
     list = [...list].sort((a, b) => {
@@ -51,6 +78,20 @@ export default function Jobs({ jobs, reload, toast, selectedIds, setSelectedIds,
     })
     return list
   }, [jobs, filters])
+
+  /* 分类列表（全库统计命中数），用于多选筛选 */
+  const domainStats = useMemo(() => {
+    const counts = new Map()
+    for (const j of jobs) for (const d of jobDomains(j)) counts.set(d, (counts.get(d) || 0) + 1)
+    return [...counts.entries()].sort((a, b) => b[1] - a[1])
+  }, [jobs])
+
+  const toggleDomain = (d) => {
+    setFilters(f => ({
+      ...f,
+      domains: (f.domains || []).includes(d) ? (f.domains || []).filter(x => x !== d) : [...(f.domains || []), d],
+    }))
+  }
 
   const toggleSelect = (id) => {
     setSelectedIds(ids => ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id])
@@ -64,14 +105,42 @@ export default function Jobs({ jobs, reload, toast, selectedIds, setSelectedIds,
   }
 
   const apply = async (job) => {
+    if (!job.sourceUrl) { toast('该岗位没有原链接，无法跳转投递页'); return }
     setApplying(job.id)
     try {
-      await api(`/jobs/${job.id}`, { method: 'PUT', body: { status: '已投递' } })
-      toast(job.sourceUrl ? '已标记为「已投递」，正在打开原岗位页面完成投递…' : '已标记为「已投递」（该岗位无原链接）')
-      if (job.sourceUrl) window.open(job.sourceUrl, '_blank')
+      await api(`/jobs/${job.id}`, { method: 'PUT', body: { status: '待投递' } })
+      window.open(job.sourceUrl, '_blank')
+      toast('已打开原岗位页面。真实投递需你在Boss页面完成（含登录）；完成后回到这里点「✓ 已投递」。')
       reload()
     } catch (e) { toast(e.message, 'err') }
     setApplying(null)
+  }
+
+  const markApplied = async (job) => {
+    try {
+      await api(`/jobs/${job.id}`, { method: 'PUT', body: { status: '已投递' } })
+      toast('已确认投递「' + job.title + '」')
+      reload()
+    } catch (e) { toast(e.message, 'err') }
+  }
+
+  /* 一键打招呼：渲染文案 → 复制到剪贴板 → 打开原岗位页 → 记录状态
+   * 平台不提供可靠的聊天深链，最后一步「粘贴发送」需在 Boss 页面完成；开启「先预览」时弹窗可改文案 */
+  const greet = async (job) => {
+    setGreetingBusy(job.id)
+    try {
+      const preview = await api(`/jobs/${job.id}/greeting/preview`, { method: 'POST' })
+      if (preview.config?.preview) { setGreetingDraft({ job, text: preview.text }); return }
+      const sent = await api(`/jobs/${job.id}/greeting`, { method: 'POST' })
+      const copied = sent.config?.autoCopy === false ? false : await copyText(sent.text)
+      if (sent.config?.openPage !== false && job.sourceUrl) window.open(job.sourceUrl, '_blank')
+      if (!copied) { setGreetingDraft({ job, text: sent.text }); toast('文案已生成，请手动复制（浏览器未授予剪贴板权限）', 'err'); return }
+      toast(copied
+        ? `已复制打招呼文案${sent.config?.openPage !== false && job.sourceUrl ? '，并打开原岗位页：点「立即沟通」后粘贴发送（⌘V）' : '，去 Boss 聊天框粘贴发送即可'}`
+        : '文案已生成')
+      reload()
+    } catch (e) { toast(e.message, 'err') }
+    finally { setGreetingBusy(null) }
   }
 
   const remove = async (job) => {
@@ -109,18 +178,36 @@ export default function Jobs({ jobs, reload, toast, selectedIds, setSelectedIds,
         <select className="select" style={{ width: 100 }} value={filters.salary} onChange={e => setF('salary', +e.target.value)}>
           {SALARY_OPTIONS.map(v => <option key={v} value={v}>{v === 0 ? '不限' : `${v}K`}</option>)}
         </select>
-        <select className="select" style={{ width: 130 }} value={filters.sort} onChange={e => setF('sort', e.target.value)}>
+        <select className="select" style={{ width: 130 }} value={filters.sort} onChange={e => setF('sort', e.target.value)}
+          title="「最新发布」按Boss页面上的发布/更新时间排（采集数据多缺失该字段，缺失时退回按导入时间）；「最新导入」按岗位进入本岗位库的时间排">
           <option value="published">最新发布在前</option>
           <option value="imported">最新导入在前</option>
         </select>
         <button className="btn sm" onClick={() => setFilters({ ...DEFAULT_FILTERS, sort: filters.sort })}>重置</button>
         <div style={{ display: 'flex', gap: 8, marginLeft: 4 }}>
-          {[{ v: 'all', l: '全部' }, { v: 'fav', l: '⭐ 收藏' }, { v: 'applied', l: '已投递' }].map(o => (
+          {[{ v: 'all', l: '全部' }, { v: 'fav', l: '⭐ 收藏' }, { v: 'applied', l: '投递跟踪' }].map(o => (
             <button key={o.v} className={'chip' + (filters.view === o.v ? ' active' : '')} onClick={() => setF('view', o.v)}>{o.l}</button>
           ))}
         </div>
         <span className="result-count">{filtered.length} 条结果</span>
       </div>
+
+      {domainStats.length > 0 && (
+        <div className="card filter-bar" style={{ marginTop: 10 }}>
+          <span className="filter-label">分类</span>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            {domainStats.map(([name, count]) => (
+              <button key={name} className={'chip' + ((filters.domains || []).includes(name) ? ' active' : '')}
+                onClick={() => toggleDomain(name)} title="可多选，命中任一所选分类即展示">
+                {name} <span style={{ opacity: 0.65 }}>{count}</span>
+              </button>
+            ))}
+            {(filters.domains || []).length > 0 && (
+              <button className="btn sm" onClick={() => setF('domains', [])}>清除分类</button>
+            )}
+          </div>
+        </div>
+      )}
 
       {filtered.length === 0 ? (
         <div className="card">
@@ -143,7 +230,6 @@ export default function Jobs({ jobs, reload, toast, selectedIds, setSelectedIds,
                     {job.favorite ? '★' : '☆'}
                   </button>
                   {job.status !== '未处理' && <span className={'tag ' + (STATUS_TAG[job.status] || '')}>{job.status}</span>}
-                  {job.source.startsWith('示例') && <span className="tag">示例</span>}
                   {job.sourceUrl && <a className="tag blue" href={job.sourceUrl} target="_blank" rel="noreferrer" style={{ textDecoration: 'none' }}>原链接 ↗</a>}
                 </div>
                 <div className="job-meta">
@@ -152,11 +238,13 @@ export default function Jobs({ jobs, reload, toast, selectedIds, setSelectedIds,
                   <span className="tag">💼 {expLabel(job)}</span>
                   {job.education && <span className="tag">🎓 {job.education}</span>}
                   {job.bossActive && <span className="tag green">🟢 {job.bossActive}</span>}
+                  {job.greetedAt && <span className="tag green" title={job.greetingText || ''}>👋 已打招呼 {fmtTime(job.greetedAt)}</span>}
                   <span className="tag">{job.publishedAt ? `发布 ${fmtTime(job.publishedAt)}` : `导入 ${fmtTime(job.importedAt)}`}</span>
                   <span className="tag">{job.source}</span>
                 </div>
                 {job.tags?.length > 0 && (
                   <div className="job-tags">
+                    {jobDomains(job).slice(0, 2).map(d => <span key={d} className="tag purple">🏷 {d}</span>)}
                     {job.tags.slice(0, 8).map(t => <span key={t} className="tag blue">{t}</span>)}
                   </div>
                 )}
@@ -171,9 +259,19 @@ export default function Jobs({ jobs, reload, toast, selectedIds, setSelectedIds,
                       {expanded[job.id] ? '收起 ▲' : '展开JD全文 ▼'}
                     </button>
                   )}
-                  <button className="btn sm" disabled={applying === job.id} onClick={() => apply(job)}>
-                    {applying === job.id ? <span className="spin" style={{ width: 12, height: 12 }} /> : '🚀'} 一键投递
+                  <button className="btn sm" disabled={applying === job.id} onClick={() => apply(job)}
+                    title="打开Boss原岗位页面完成投递（不会自动标记为已投递）">
+                    {applying === job.id ? <span className="spin" style={{ width: 12, height: 12 }} /> : '🚀'} 去投递
                   </button>
+                  <button className="btn sm" disabled={greetingBusy === job.id} onClick={() => greet(job)}
+                    title={job.greetedAt ? '重新生成打招呼文案并复制' : '一键生成打招呼文案并复制到剪贴板，打开原岗位页后粘贴发送'}>
+                    {greetingBusy === job.id ? <span className="spin" style={{ width: 12, height: 12 }} /> : '👋'} {job.greetedAt ? '重新打招呼' : '打招呼'}
+                  </button>
+                  {job.status === '待投递' && (
+                    <button className="btn sm primary" onClick={() => markApplied(job)} title="在Boss页面实际完成投递后点此确认">
+                      ✓ 确认已投递
+                    </button>
+                  )}
                   <button className="btn sm" onClick={() => toggleSelect(job.id)}>
                     {selectedIds.includes(job.id) ? '取消选择' : '☑ 加入分析'}
                   </button>
@@ -198,7 +296,55 @@ export default function Jobs({ jobs, reload, toast, selectedIds, setSelectedIds,
       {showImport && <ImportModal onClose={() => setShowImport(false)} reload={reload} toast={toast} />}
       {showGuide && <GuideModal onClose={() => setShowGuide(false)} />}
       {editing && <JobFormModal job={editing === 'new' ? null : editing} onClose={() => setEditing(null)} reload={reload} toast={toast} />}
+      {greetingDraft && (
+        <GreetModal job={greetingDraft.job} text={greetingDraft.text}
+          onClose={() => setGreetingDraft(null)} reload={reload} toast={toast} />
+      )}
     </div>
+  )
+}
+
+/* ================= 打招呼弹窗（先预览/改文案再发送） ================= */
+function GreetModal({ job, text, onClose, reload, toast }) {
+  const [draft, setDraft] = useState(text)
+  const [busy, setBusy] = useState(false)
+
+  const send = async (record) => {
+    setBusy(true)
+    try {
+      const body = { text: draft }
+      if (record) {
+        const r = await api(`/jobs/${job.id}/greeting`, { method: 'POST', body })
+        if (job.sourceUrl) window.open(job.sourceUrl, '_blank')
+        toast(`已记录「${job.title}」的打招呼文案${job.sourceUrl ? '，并打开原岗位页，粘贴发送即可' : ''}`)
+        reload()
+      } else {
+        const ok = await copyText(draft)
+        toast(ok ? '文案已复制' : '复制失败，请手动选中复制', ok ? '' : 'err')
+      }
+      onClose()
+    } catch (e) { toast(e.message, 'err') }
+    setBusy(false)
+  }
+
+  return (
+    <Modal title={`👋 打招呼 · ${job.title}`} onClose={onClose}>
+      <div className="callout info" style={{ marginBottom: 12 }}>
+        文案由「设置 → 打招呼」的模板生成，可在这里临时修改（只影响本次，不改模板）。
+        平台没有稳定的聊天深链，复制后到 Boss 页面点「立即沟通」粘贴发送。
+      </div>
+      <div className="field">
+        <label>打招呼文案（{draft.length} 字）</label>
+        <textarea className="input" rows={7} value={draft} onChange={e => setDraft(e.target.value)} />
+      </div>
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        <button className="btn primary" disabled={busy || !draft.trim()} onClick={() => send(true)}>
+          {busy ? <span className="spin" /> : '📋'} 复制并打开岗位页
+        </button>
+        <button className="btn" disabled={busy || !draft.trim()} onClick={() => send(false)}>仅复制</button>
+        <button className="btn ghost" disabled={busy} onClick={onClose}>取消</button>
+      </div>
+    </Modal>
   )
 }
 
@@ -259,6 +405,8 @@ function ScraperTab({ reload, toast }) {
   const [status, setStatus] = useState(null)
   const [picked, setPicked] = useState(null)
   const [busy, setBusy] = useState(false)
+  const [filling, setFilling] = useState(false)
+  const [fillMsg, setFillMsg] = useState('')
   const load = async () => {
     try { setStatus(await api('/scraper/status')) } catch (e) { toast(e.message, 'err') }
   }
@@ -274,6 +422,44 @@ function ScraperTab({ reload, toast }) {
       reload()
     } catch (e) { toast(e.message, 'err') }
     setBusy(false)
+  }
+  /* 深度补齐：先合并已有详情文件，仍有缺JD岗位时自动用采集器重抓这些岗位的详情页 */
+  const doBackfill = async () => {
+    setFilling(true)
+    try {
+      const st0 = await api('/jobs/backfill-details')
+      if (st0.lackingNow === 0) {
+        toast('库内岗位JD均已完整，无需补齐')
+        setFilling(false)
+        return
+      }
+      const merge = await api('/jobs/backfill-details', { method: 'POST', body: {} })
+      if (merge.ok && merge.updated > 0) {
+        toast(`已从现有详情文件回填 ${merge.updated} 个岗位的JD`)
+        reload()
+      }
+      const st1 = await api('/jobs/backfill-details')
+      if (st1.lackingNow === 0) { setFilling(false); return }
+      const r = await api('/jobs/backfill-details', { method: 'POST', body: { deep: true } })
+      if (r.skipped) { toast(`无法启动深度补齐：${r.reason}`, 'err'); setFilling(false); return }
+      setFillMsg(`正在重抓 ${r.pending} 个岗位的详情页（约需几分钟，请勿关闭页面）…`)
+      const timer = setInterval(async () => {
+        try {
+          const st = await api('/jobs/backfill-details')
+          if (!st.running) {
+            clearInterval(timer)
+            setFilling(false); setFillMsg('')
+            const last = st.last
+            if (last?.ok) {
+              toast(`深度补齐完成：回填JD ${last.backfill?.updated || 0}/${last.backfill?.matched || 0} 个，剩余缺失 ${st.lackingNow} 个`)
+            } else {
+              toast(`深度补齐失败：${last?.error || '未知错误'}`, 'err')
+            }
+            reload()
+          }
+        } catch (e) { /* 轮询失败忽略，下轮重试 */ }
+      }, 4000)
+    } catch (e) { toast(e.message, 'err'); setFilling(false); setFillMsg('') }
   }
   if (!status) return <div className="progress-text"><span className="spin dark" /> 正在检查采集结果目录…</div>
   return (
@@ -297,9 +483,14 @@ function ScraperTab({ reload, toast }) {
               </label>
             ))}
           </div>
-          <div style={{ display: 'flex', gap: 10 }}>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
             <button className="btn primary" disabled={busy} onClick={doImport}>{busy ? <span className="spin" /> : '📥'} 导入选中的文件</button>
             <button className="btn" onClick={load}>↻ 刷新目录</button>
+            <button className="btn" disabled={filling} onClick={doBackfill}
+              title="先合并已有详情文件；仍有JD不全的岗位时，自动用采集器重新抓取这些岗位的详情页（需已完成Chrome登录配置）">
+              {filling ? <span className="spin" /> : '🩹'} 补齐JD详情
+            </button>
+            {fillMsg && <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>{fillMsg}</span>}
           </div>
         </>
       )}

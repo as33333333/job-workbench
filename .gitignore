@@ -5,3 +5,5 @@ collector/
 .DS_Store
 *.log
 export/
+
+.env

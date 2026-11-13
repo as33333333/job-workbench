@@ -8,9 +8,75 @@ export async function api(path, opts = {}) {
   let data = {}
   try { data = await res.json() } catch {}
   if (!res.ok || (data && data.ok === false)) {
-    throw new Error(data?.error || `请求失败（${res.status}）`)
+    const err = new Error(data?.error || `请求失败（${res.status}）`)
+    err.status = res.status
+    throw err
   }
   return data
+}
+
+/* 流式接口（SSE over POST）：onProgress 收到 {message, percent}，返回 done 事件的负载
+ * 旧版服务端（如 8787 上未重启的进程）没有 /stream 路由，会 404 → 自动回退到普通接口，只是没有进度 */
+export async function apiStream(path, body, { onProgress, signal, fallbackPath, fallbackBody } = {}) {
+  const res = await fetch('/api' + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+    body: JSON.stringify(body || {}),
+    signal,
+  })
+
+  const canFallback = fallbackPath && [404, 405, 501].includes(res.status)
+  if (canFallback) {
+    onProgress?.({ message: '服务端为旧版本，正在用兼容模式分析（无进度）…', percent: null })
+    return api(fallbackPath, { method: 'POST', body: fallbackBody || body })
+  }
+  if (!res.ok || !res.body) {
+    let data = {}
+    try { data = await res.json() } catch {}
+    throw new Error(data?.error || `请求失败（${res.status}）`)
+  }
+
+  const type = res.headers.get('content-type') || ''
+  if (!type.includes('text/event-stream')) {
+    // 兼容非流式响应（代理或旧服务端直接返回 JSON）
+    const data = await res.json().catch(() => ({}))
+    if (data && data.ok === false) throw new Error(data.error || '分析失败')
+    if (data && (data.data || data.id)) return data
+    throw new Error(data?.error || '服务端返回了非预期内容，请重试')
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let result = null
+  let failure = ''
+  const handle = (chunk) => {
+    let event = 'message'
+    const dataLines = []
+    for (const line of chunk.split('\n')) {
+      if (line.startsWith('event:')) event = line.slice(6).trim()
+      else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
+    }
+    let payload = null
+    try { payload = dataLines.length ? JSON.parse(dataLines.join('')) : null } catch { payload = null }
+    if (event === 'progress') onProgress?.({ message: payload?.message || '', percent: payload?.percent ?? null })
+    else if (event === 'done') result = payload
+    else if (event === 'error') failure = payload?.error || '分析失败'
+  }
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let idx
+    while ((idx = buffer.indexOf('\n\n')) >= 0) {
+      handle(buffer.slice(0, idx))
+      buffer = buffer.slice(idx + 2)
+    }
+  }
+  if (buffer.trim()) handle(buffer)
+  if (failure) throw new Error(failure)
+  if (!result) throw new Error('与服务端的连接中断，未收到分析结果，请重试')
+  return result
 }
 
 export function fmtTime(iso) {

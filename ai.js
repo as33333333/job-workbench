@@ -1,13 +1,19 @@
 import { getSetting, setSetting } from './db.js'
 
-export const DEFAULT_API_BASE = 'https://api.z.ai/api/paas/v4'
-export const DEFAULT_MODEL = 'glm-4.6'
+export const DEFAULT_API_BASE = 'https://api.deepseek.com'
+export const DEFAULT_MODEL = 'deepseek-flash'   // DeepSeek-V4.1-Flash；Pro 用 deepseek-v4-pro
 
 export function aiConfig() {
+  // 环境变量优先（适合部署/容器场景，避免把 Key 落到数据库），其次读取设置页保存的配置
+  const envKey = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || ''
+  const envBase = process.env.AI_API_BASE || process.env.OPENAI_BASE_URL || ''
+  const envModel = process.env.AI_MODEL || ''
+  const savedKey = getSetting('apiKey') || ''
   return {
-    apiBase: getSetting('apiBase') || DEFAULT_API_BASE,
-    apiKey: getSetting('apiKey') || '',
-    model: getSetting('model') || DEFAULT_MODEL,
+    apiBase: envBase || getSetting('apiBase') || DEFAULT_API_BASE,
+    apiKey: envKey || savedKey,
+    model: envModel || getSetting('model') || DEFAULT_MODEL,
+    source: envKey ? 'env' : (savedKey ? 'settings' : 'none'),
   }
 }
 export function aiReady() { return !!aiConfig().apiKey }
@@ -19,25 +25,71 @@ export function saveAiConfig({ apiBase, apiKey, model, clearKey } = {}) {
   else if (apiKey) setSetting('apiKey', apiKey.trim())
 }
 
-export async function chat(messages, { temperature = 0.4, maxTokens = 4096, json = true } = {}) {
+export async function chat(messages, { temperature = 0.4, maxTokens = 4096, json = true, timeoutMs = 0, thinking } = {}) {
   const { apiBase, apiKey, model } = aiConfig()
   if (!apiKey) throw new Error('未配置 AI API Key，请在「设置」中填写')
   let url = apiBase.replace(/\/+$/, '')
   if (!url.endsWith('/chat/completions')) url += '/chat/completions'
   const body = { model, messages, temperature, max_tokens: maxTokens }
   if (json) body.response_format = { type: 'json_object' }
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify(body),
-  })
+  // DeepSeek 是推理型模型：思考 token 会挤占输出预算，按需控制（其他服务商不发送该参数）
+  const isDeepSeek = /deepseek/i.test(url)
+  if (isDeepSeek && thinking) {
+    if (thinking === 'off') body.thinking = { type: 'disabled' }
+    else {
+      body.thinking = { type: 'enabled' }
+      if (thinking === 'low') body.reasoning_effort = 'low'
+    }
+  }
+  const controller = timeoutMs > 0 ? new AbortController() : null
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null
+  let res
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify(body),
+      signal: controller?.signal,
+    })
+  } catch (e) {
+    if (e?.name === 'AbortError') throw new Error(`AI 请求超时（${Math.round(timeoutMs / 1000)}秒），可稍后重试`)
+    throw new Error(`AI 请求失败：${e.message}`)
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
   if (!res.ok) {
     const t = await res.text().catch(() => '')
+    const lower = t.toLowerCase()
+    if (res.status === 401 || lower.includes('authentication')) {
+      throw new Error(`API Key 无效或已过期（${res.status}）。请检查 AI_API_KEY 是否填写正确。`)
+    }
+    if (res.status === 402 || lower.includes('insufficient') || lower.includes('balance')) {
+      throw new Error(`账户额度不足（${res.status}）：${t.slice(0, 160)}`)
+    }
+    if (res.status === 429) {
+      throw new Error(`请求过于频繁或并发超限（429），请稍后重试：${t.slice(0, 120)}`)
+    }
+    if (res.status === 404 || lower.includes('model') && (lower.includes('not exist') || lower.includes('not found') || lower.includes('invalid'))) {
+      throw new Error(`模型名无效：当前配置为「${model}」。DeepSeek 可用模型：deepseek-flash（V4.1-Flash）、deepseek-v4-pro。请检查 AI_MODEL 或设置页的模型名称。`)
+    }
     throw new Error(`AI 接口错误 ${res.status}：${t.slice(0, 300)}`)
   }
   const data = await res.json()
-  const content = data.choices?.[0]?.message?.content
-  if (!content) throw new Error('AI 返回内容为空')
+  const choice = data.choices?.[0]
+  const content = choice?.message?.content
+  if (!content) {
+    // 带上诊断信息，避免只报"内容为空"无法排查
+    const diag = {
+      finish_reason: choice?.finish_reason,
+      usage: data.usage,
+      hasReasoning: !!choice?.message?.reasoning_content,
+      keys: Object.keys(choice?.message || {}),
+    }
+    const err = new Error(`AI 返回内容为空（${JSON.stringify(diag)}）；原始响应片段：${JSON.stringify(data).slice(0, 300)}`)
+    err.code = 'EMPTY_CONTENT'
+    err.diag = diag
+    throw err
+  }
   return content
 }
 
@@ -77,7 +129,7 @@ export async function aiParseJd(text) {
   const out = await chat([
     { role: 'system', content: PARSE_JD_PROMPT },
     { role: 'user', content: text.slice(0, 8000) },
-  ], { temperature: 0.2 })
+  ], { temperature: 0.2, maxTokens: 3000, thinking: 'off' })
   return extractJson(out)
 }
 
@@ -139,7 +191,7 @@ ${docText.slice(0, 9000)}`
   const out = await chat([
     { role: 'system', content: ANALYZE_PROMPT },
     { role: 'user', content: user },
-  ], { temperature: 0.4, maxTokens: 3500 })
+  ], { temperature: 0.4, maxTokens: 6000, thinking: 'off' })
   return extractJson(out)
 }
 
@@ -152,12 +204,15 @@ const COMMON_PROMPT = `你是资深产品招聘专家。用户提供了多个目
   "resumeStrategy": "简历应如何围绕共性要求组织（2-3句）"
 }`
 
-export async function aiExtractCommon(jobs) {
+export async function aiExtractCommon(jobs, tuning = {}) {
   const list = jobs.map((job, i) => `--- 岗位${i + 1}：${job.title}（${job.company || ''}）${job.salaryText || ''}\n${(job.description || '').slice(0, 3000)}`).join('\n\n')
+  // 共性提炼只是汇总任务，输出上限不超过 8000，避免挤占单岗分析预算
+  const maxTokens = Math.min(Number(tuning?.maxTokens) || 8000, 8000)
+  const timeoutMs = (Number(tuning?.timeoutSec) || 120) * 1000
   const out = await chat([
     { role: 'system', content: COMMON_PROMPT },
     { role: 'user', content: list },
-  ], { temperature: 0.4, maxTokens: 3000 })
+  ], { temperature: 0.4, maxTokens, timeoutMs, thinking: 'off' })
   return extractJson(out)
 }
 
@@ -189,7 +244,7 @@ ${docText.slice(0, 9000)}`
   const out = await chat([
     { role: 'system', content: REWRITE_PROMPT },
     { role: 'user', content: user },
-  ], { temperature: 0.5, maxTokens: 6000 })
+  ], { temperature: 0.5, maxTokens: 12000, thinking: 'low', timeoutMs: 180_000 })
   return extractJson(out)
 }
 
@@ -198,7 +253,7 @@ export async function testConnection() {
   const out = await chat([
     { role: 'system', content: '你是连通性测试助手，只输出JSON {"pong":true}' },
     { role: 'user', content: 'ping' },
-  ], { temperature: 0, maxTokens: 20 })
+  ], { temperature: 0, maxTokens: 200, thinking: 'off' })
   return { ok: true, latency: Date.now() - t0, reply: out.slice(0, 100) }
 }
 
